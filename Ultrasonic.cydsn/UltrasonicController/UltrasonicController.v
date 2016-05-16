@@ -31,13 +31,16 @@ module UltrasonicController (
 
 localparam True = 1'b1;
 localparam False = 1'b0;
-localparam transmissionCounterMax = 8'd20;
+localparam transmissionPeriods = 8'd10;
+localparam transmissionMaskTime = 8'd2;
+localparam transmissionCounterMax = transmissionPeriods+transmissionMaskTime;
 
 localparam returnTimeCounterMax = 16'd6061; // time for sound to travel two metres, in μs.
 
 generate 
 
 reg [7:0] transmissionCounter;
+wire transmitting = (transmissionCounter > transmissionMaskTime);
 wire transmissionCounterRunning = (transmissionCounter > 0);
 
 always @(posedge ultrasonicClock) begin
@@ -52,7 +55,7 @@ always @(posedge ultrasonicClock) begin
     end
 end
 
-assign ultrasonicTX = transmissionCounterRunning & ultrasonicClock;
+assign ultrasonicTX = ultrasonicClock & transmitting;
 
 
 reg [15:0] returnTimeCounter;
@@ -67,7 +70,7 @@ always @(posedge microSecondClock) begin
     casex ({
         reset,
         trigger,
-        ultrasonicRX && waitingOnRX,
+        ultrasonicRX & waitingOnRX & ~transmissionCounterRunning,
         returnTimeCounterRunning
     })
         4'b1xxx: begin
@@ -83,19 +86,19 @@ always @(posedge microSecondClock) begin
             waitingOnRX <= True;
         end
         4'b001x: begin
-            receivedInterrupt <= False;
+            receivedInterrupt <= True;
             finalReturnTime <= returnTimeCounter;
             returnTimeCounter <= 16'd0;
             waitingOnRX <= False;
         end
         4'b0001: begin
-            receivedInterrupt <= True;
+            receivedInterrupt <= False;
             finalReturnTime <= finalReturnTime;
-            returnTimeCounter <= returnTimeCounter + 15'd1;
+            returnTimeCounter <= returnTimeCounter + 1'd1;
             waitingOnRX <= waitingOnRX;
         end
         4'b0000: begin
-            receivedInterrupt <= False;
+            receivedInterrupt <= receivedInterrupt;
             finalReturnTime <= finalReturnTime;
             returnTimeCounter <= 16'd0;
             waitingOnRX <= False;

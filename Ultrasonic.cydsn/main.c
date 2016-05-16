@@ -14,6 +14,14 @@
 
 int ultrasonicReceivedFlag = 0;
 uint16_t receiveTimeMicroSeconds = 0;
+uint16_t* receiveTimeTarget = (uint16_t*) 0;
+
+void inline writeToReadingTarget(uint16_t time) {
+    if (receiveTimeTarget) {
+        (*receiveTimeTarget) = time;
+    }
+    receiveTimeTarget = (uint16_t*) 0;
+}
 
 uint16_t inline combineHighAndLow(uint8_t high, uint8_t low) {
     uint16_t returnInt = ((uint16_t) high << 8) | low;
@@ -30,6 +38,7 @@ CY_ISR_PROTO(onUltrasonicReceived);
 CY_ISR(onUltrasonicReceived) {
     ultrasonicReceivedFlag++;
     receiveTimeMicroSeconds = getReceiveTime();
+    writeToReadingTarget(receiveTimeMicroSeconds);
     ledReg_Write(0xFF);
 }
 
@@ -39,6 +48,33 @@ int _write(int file, char *ptr, int len) {
     return len;
 }
 
+
+void inline triggerReading() {
+    ultrasonicTrigger_Write(0xFF);
+}
+
+    
+
+#define READINGS_TO_TAKE 20
+#define MS_BETWEEN_READINGS 5
+#define MIN_VALID_READING 5
+
+uint16_t getAverageReading() {
+    uint16_t readings[READINGS_TO_TAKE];
+    uint8_t successfulReadings = 0;
+    uint32_t sumOfReadings = 0;
+    for (int i = 0; i < READINGS_TO_TAKE; i++) {
+        readings[i] = 0;
+        receiveTimeTarget = &(readings[i]);
+        triggerReading();
+        CyDelay(MS_BETWEEN_READINGS);
+        if (readings[i] > MIN_VALID_READING) {
+            sumOfReadings += readings[i];
+            successfulReadings++;
+        }
+    }
+    return sumOfReadings/successfulReadings;
+}
 
 #include <stdio.h>
 
@@ -59,16 +95,12 @@ int main() {
     //ledReg_Write(0xFF);
     ultrasonicTrigger_Write(0xFF);
     
+    VDAC8_1_Start();
+    
     while (1) {
-        CyDelay(1);
-        if (ultrasonicReceivedFlag) {
-            //printf("ISR has been called! There were %i flags. \r\n", ultrasonicReceivedFlag);
-            //printf("Return time was %u. \r\n", receiveTimeMicroSeconds);
-            ultrasonicReceivedFlag = 0;
-            ledReg_Write(0xFF);
-        }
-        printf("Hello from the loop!\r\n");
-        ultrasonicTrigger_Write(0xFF);
+        CyDelay(1000);
+        uint16_t averageReading = getAverageReading();
+        printf("average reading: %u \r\n", averageReading);
         /* Place your application code here. */
     }
 }

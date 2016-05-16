@@ -23,6 +23,7 @@ module UltrasonicController (
     
 	output reg receivedInterrupt,
 	output wire [15:0] timeMicroSeconds,
+    output wire [15:0] receiveTimeCounter,
 	output wire ultrasonicTX
 );
 
@@ -113,6 +114,7 @@ always @(posedge microSecondClock) begin
 end
 
 assign timeMicroSeconds = finalReturnTime;
+assign receiveTimeCounter = returnTimeCounter;
 
 endgenerate
 

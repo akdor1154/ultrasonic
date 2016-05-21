@@ -48,7 +48,6 @@ int _write(int file, char *ptr, int len) {
     return len;
 }
 
-
 void inline triggerReading() {
     ultrasonicTrigger_Write(0xFF);
 }
@@ -205,6 +204,7 @@ int loadCalibration() {
     }
     
     printf("Calibration in EEPROM seems valid. Loading... \r\n");
+    calibrated = 1;
     currentCalibration = calibration;
     
     printf("Calibration loaded: um = %u * us  +  %u. \r\n", currentCalibration.a, currentCalibration.c);
@@ -234,7 +234,24 @@ void saveCalibration(Calibration cal) {
     }
 }
 
+uint8_t useInches;
 
+CY_ISR_PROTO(onUnitSwitched);
+CY_ISR(onUnitSwitched) {
+    useInches = !(useInches);
+}
+
+typedef struct BCDNumber {
+    uint8_t digit0;
+    uint8_t digit1;
+} BCDNumber;
+
+BCDNumber intToBCDNumber(unsigned int num) {
+    uint8_t ones = num % 10;
+    uint8_t tens = num/10;
+    BCDNumber bcdNumber = {.digit0 = ones, .digit1 = tens};
+    return bcdNumber;
+}
 
 int main() {
     CyGlobalIntEnable; /* Enable global interrupts. */
@@ -250,6 +267,9 @@ int main() {
     ultrasonicReset_Write(0xFF);
     receivedInterrupt_Enable();
     receivedInterrupt_StartEx(onUltrasonicReceived);
+    
+    unitSwitchInterrupt_Enable();
+    unitSwitchInterrupt_StartEx(onUnitSwitched);
     //ledReg_Write(0xFF);
     ultrasonicTrigger_Write(0xFF);
     
@@ -262,13 +282,24 @@ int main() {
         saveCalibration(currentCalibration);
     }
     
+    const char mmStr[3] = "mm";
+    const char inchStr[7] = "inches";
+    
     while (1) {
         waitForOnboardButton();
         uint16_t averageReading = getAverageReading(0);
         if (averageReading == 0) {
             printf("failed.\r\n");
         } else if (calibrated) {
-            printf("Reading guestimated at %u mm. \r\n", usToMm(averageReading, currentCalibration) );
+            uint16_t readingValue = usToMm(averageReading, currentCalibration);
+            const char* unit;
+            if (useInches) {
+                readingValue = (readingValue * 10) / 254;
+                unit = (char*) inchStr;
+            } else {
+                unit = (char*) mmStr;
+            }
+            printf("Reading guestimated at %u %s. \r\n", readingValue, unit);
         } else {
             printf("Reading took %u us, but we aren't calibrated. \r\n", averageReading);
         }

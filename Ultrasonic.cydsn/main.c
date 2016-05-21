@@ -11,6 +11,7 @@
 */
 #include <project.h>
 #include <stdint.h>
+#include <stdio.h>
 
 int ultrasonicReceivedFlag = 0;
 uint16_t receiveTimeMicroSeconds = 0;
@@ -39,7 +40,6 @@ CY_ISR(onUltrasonicReceived) {
     ultrasonicReceivedFlag++;
     receiveTimeMicroSeconds = getReceiveTime();
     writeToReadingTarget(receiveTimeMicroSeconds);
-    ledReg_Write(0xFF);
 }
 
 int _write(int file, char *ptr, int len) {
@@ -55,28 +55,186 @@ void inline triggerReading() {
 
     
 
-#define READINGS_TO_TAKE 20
-#define MS_BETWEEN_READINGS 5
+#define MAX_READINGS_TO_ATTEMPT 200
+#define MAX_SUCCESSFUL_READINGS 10
+#define READING_WAIT_TIME_MS 8
 #define MIN_VALID_READING 5
 
-uint16_t getAverageReading() {
-    uint16_t readings[READINGS_TO_TAKE];
+uint16_t getAverageReading(int minSuccessfulReadings) {
     uint8_t successfulReadings = 0;
     uint32_t sumOfReadings = 0;
-    for (int i = 0; i < READINGS_TO_TAKE; i++) {
-        readings[i] = 0;
-        receiveTimeTarget = &(readings[i]);
-        triggerReading();
-        CyDelay(MS_BETWEEN_READINGS);
-        if (readings[i] > MIN_VALID_READING) {
-            sumOfReadings += readings[i];
-            successfulReadings++;
+    int i = 0;
+    while (successfulReadings < MAX_SUCCESSFUL_READINGS) {
+        if (successfulReadings >= minSuccessfulReadings && i > MAX_READINGS_TO_ATTEMPT) {
+            break;
         }
+        uint16_t reading = 0;
+        receiveTimeTarget = &(reading);
+        triggerReading();
+        CyDelay(READING_WAIT_TIME_MS);
+        if (reading > MIN_VALID_READING) {
+            sumOfReadings += reading;
+            successfulReadings++;
+        } else {
+            printf(".");
+        }
+        i++;
     }
     return sumOfReadings/successfulReadings;
 }
 
-#include <stdio.h>
+typedef enum {
+    FlashSlow = 0b00,
+    FlashFast = 0b01,
+    On        = 0b10,
+    Off       = 0b11
+} LedMode;
+
+void setLedMode(LedMode mode) {
+    ledSpeedControl_Write(mode);
+}
+
+#define TIME_TO_WAIT_FOR_BUTTON_MS 20000
+#define WAIT_FOR_BUTTON_LOOP_DELAY_MS 200
+#define MAX_WAIT_FOR_BUTTON_ITERATIONS (TIME_TO_WAIT_FOR_BUTTON_MS/WAIT_FOR_BUTTON_LOOP_DELAY_MS)
+
+inline int waitForOnboardButton() {
+    //reset button register
+    onboardButtonRegister_Read();
+    int buttonPressed = 0;
+    for (int i = 0; i<MAX_WAIT_FOR_BUTTON_ITERATIONS; i++) {
+        buttonPressed = onboardButtonRegister_Read();
+        if (buttonPressed) {
+            break;
+        }
+        CyDelay(WAIT_FOR_BUTTON_LOOP_DELAY_MS);
+    }
+    return buttonPressed;
+}
+
+typedef struct Calibration {
+    unsigned int a;
+    signed int c;
+} Calibration;
+
+Calibration currentCalibration;
+int calibrated = 0;
+
+Calibration calculateCalibration(unsigned int x1, unsigned int y1, unsigned int x2, unsigned int y2) {
+    unsigned int a = (y2 - y1) / (x2 - x1);
+    signed int c = y2 - (a * x2);
+    Calibration cal = {.a = a, .c = c};
+    return cal;
+}
+
+unsigned int usToMm(unsigned int us, Calibration cal) {
+    return (cal.a * us + cal.c) / 1000;
+}
+
+#define CALIBRATION_DISTANCE_1_UM 50000
+#define CALIBRATION_DISTANCE_2_UM 150000
+
+void calibrate() {
+    
+    unsigned int y1_um = CALIBRATION_DISTANCE_1_UM;
+    unsigned int y2_um = CALIBRATION_DISTANCE_2_UM;
+    
+    // start light flashing
+    setLedMode(FlashSlow);
+    printf("Calibrate at %umm. \r\n", y1_um/1000);
+    
+    //wait for button
+    waitForOnboardButton();
+    
+    //get reading for 100mm
+    uint16_t x1_us = getAverageReading(5);
+    printf("Time for %umm: %u microseconds. \r\n", y1_um/1000, x1_us);
+    
+    //flash faster
+    setLedMode(FlashFast);
+    printf("Now calibrate at %umm. \r\n", y2_um/1000);
+    
+    //wait for button
+    waitForOnboardButton();
+    
+    //get reading for 400mm
+    uint16_t x2_us = getAverageReading(5);
+    printf("Time for %umm: %u microseconds. \r\n", y2_um/1000, x2_us);
+    
+    if (x1_us == 0 || x2_us == 0) {
+        printf("Calibration failed! :( \r\n");
+        return;
+    }
+    
+    calibrated = 1;
+    
+    //calculate
+    currentCalibration = calculateCalibration(x1_us, y1_um, x2_us, y2_um);
+    printf("calibration results: um = %u * us  +  %i", currentCalibration.a, currentCalibration.c);
+    
+    printf(
+        "Calibration check. %umm reading seems to be taken at %u. \r\n",
+        y1_um, usToMm(x1_us, currentCalibration)
+    );
+    printf(
+        "Calibration check. %umm reading seems to be taken at %u. \r\n",
+        y2_um, usToMm(x2_us, currentCalibration)
+    );
+    //save results
+    setLedMode(On);
+    
+    //print result
+}
+
+uint32_t calculateCalibrationChecksum(Calibration calibration) {
+    uint32_t *calibrationAddr = (uint32_t*) &calibration;
+    return 0xCCCCCCCC ^ calibrationAddr[0] ^ calibrationAddr[1];
+}
+
+int loadCalibration() {
+    uint8_t* eepromBaseAddr = (uint8_t*) CYDEV_EE_BASE;
+    uint32_t* calibrationChecksumAddr = (uint32_t*) eepromBaseAddr;
+    Calibration* calibrationAddr = (Calibration*) (eepromBaseAddr + 4);
+    
+    uint32_t calibrationChecksum = *calibrationChecksumAddr;
+    Calibration calibration = *calibrationAddr;
+    
+    if (calibrationChecksum != calculateCalibrationChecksum(calibration)) {
+        printf("EEPROM appears to lack saved calibration Check: 0x%08x.\r\n", calibrationChecksum);
+        return 0;
+    }
+    
+    printf("Calibration in EEPROM seems valid. Loading... \r\n");
+    currentCalibration = calibration;
+    
+    printf("Calibration loaded: um = %u * us  +  %u. \r\n", currentCalibration.a, currentCalibration.c);
+    
+    return 1;
+}
+
+
+void saveCalibration(Calibration cal) {
+    size_t calibrationSize = sizeof(Calibration);
+    uint8_t rowToWrite[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    uint32_t* checkAddr = (uint32_t*) rowToWrite;
+    Calibration* calibrationAddr = (Calibration*) (rowToWrite + 4);
+    
+    *checkAddr = calculateCalibrationChecksum(cal);
+    *calibrationAddr = cal;
+    
+    printf("%08x %08x %08x %08x \r\n", *checkAddr, *(checkAddr+1), *(checkAddr+2), *(checkAddr+3));
+    
+    printf("Saving calibration to EEPROM. \r\n");
+    
+    cystatus writeStatus = eeprom_Write(rowToWrite, 0);
+    if (writeStatus != CYRET_SUCCESS) {
+        printf("write error: %li \r\n", writeStatus);
+    } else {
+        printf("saved. \r\n");
+    }
+}
+
+
 
 int main() {
     CyGlobalIntEnable; /* Enable global interrupts. */
@@ -96,12 +254,24 @@ int main() {
     ultrasonicTrigger_Write(0xFF);
     
     VDAC8_1_Start();
+    eeprom_Start();
+    CyDelay(5000);
+    CySetTemp();
+    if (!loadCalibration()) {
+        calibrate();
+        saveCalibration(currentCalibration);
+    }
     
     while (1) {
-        CyDelay(1000);
-        uint16_t averageReading = getAverageReading();
-        printf("average reading: %u \r\n", averageReading);
-        /* Place your application code here. */
+        waitForOnboardButton();
+        uint16_t averageReading = getAverageReading(0);
+        if (averageReading == 0) {
+            printf("failed.\r\n");
+        } else if (calibrated) {
+            printf("Reading guestimated at %u mm. \r\n", usToMm(averageReading, currentCalibration) );
+        } else {
+            printf("Reading took %u us, but we aren't calibrated. \r\n", averageReading);
+        }
     }
 }
 

@@ -52,14 +52,19 @@ void inline triggerReading() {
     ultrasonicTrigger_Write(0xFF);
 }
 
+int abs(int n) {
+    return (n < 0) ? -n : n;
+}
+
     
 
 #define MAX_READINGS_TO_ATTEMPT 200
 #define MAX_SUCCESSFUL_READINGS 10
 #define READING_WAIT_TIME_MS 8
 #define MIN_VALID_READING 5
+#define ACCEPTED_READING_DELTA 80
 
-uint16_t getAverageReading(int minSuccessfulReadings) {
+uint16_t getAverageReading(int minSuccessfulReadings, int expectedValue) {
     uint8_t successfulReadings = 0;
     uint32_t sumOfReadings = 0;
     int i = 0;
@@ -72,13 +77,16 @@ uint16_t getAverageReading(int minSuccessfulReadings) {
         triggerReading();
         CyDelay(READING_WAIT_TIME_MS);
         if (reading > MIN_VALID_READING) {
-            sumOfReadings += reading;
-            successfulReadings++;
+            if (expectedValue == 0 || abs(reading - expectedValue) < ACCEPTED_READING_DELTA) {
+                sumOfReadings += reading;
+                successfulReadings++;
+            }
         } else {
-            printf(".");
         }
+        printf("%u ", reading);
         i++;
     }
+    printf("\r\n");
     return sumOfReadings/successfulReadings;
 }
 
@@ -108,7 +116,14 @@ inline int waitForOnboardButton() {
         }
         CyDelay(WAIT_FOR_BUTTON_LOOP_DELAY_MS);
     }
-    return buttonPressed;
+    uint8_t buttonHeld = buttonHeldRegister_Read();
+    if (buttonHeld) {
+        return 2;
+    }
+    if (buttonPressed) {
+        return 1;
+    }
+    return 0;
 }
 
 typedef struct Calibration {
@@ -146,7 +161,7 @@ void calibrate() {
     waitForOnboardButton();
     
     //get reading for 100mm
-    uint16_t x1_us = getAverageReading(5);
+    uint16_t x1_us = getAverageReading(5, 572);
     printf("Time for %umm: %u microseconds. \r\n", y1_um/1000, x1_us);
     
     //flash faster
@@ -157,7 +172,7 @@ void calibrate() {
     waitForOnboardButton();
     
     //get reading for 400mm
-    uint16_t x2_us = getAverageReading(5);
+    uint16_t x2_us = getAverageReading(5, 1150);
     printf("Time for %umm: %u microseconds. \r\n", y2_um/1000, x2_us);
     
     if (x1_us == 0 || x2_us == 0) {
@@ -207,7 +222,7 @@ int loadCalibration() {
     calibrated = 1;
     currentCalibration = calibration;
     
-    printf("Calibration loaded: um = %u * us  +  %u. \r\n", currentCalibration.a, currentCalibration.c);
+    printf("Calibration loaded: um = %u * us  +  %i. \r\n", currentCalibration.a, currentCalibration.c);
     
     return 1;
 }
@@ -239,6 +254,7 @@ uint8_t useInches;
 CY_ISR_PROTO(onUnitSwitched);
 CY_ISR(onUnitSwitched) {
     useInches = !(useInches);
+    unitIndicatorLedReg_Write(useInches);
 }
 
 typedef struct BCDNumber {
@@ -286,8 +302,15 @@ int main() {
     const char inchStr[7] = "inches";
     
     while (1) {
-        waitForOnboardButton();
-        uint16_t averageReading = getAverageReading(0);
+        int button = waitForOnboardButton();
+        if (button == 2) {
+            calibrate();
+            saveCalibration(currentCalibration);
+            continue;
+        } else if (button == 0) {
+            continue;
+        }
+        uint16_t averageReading = getAverageReading(0, 0);
         if (averageReading == 0) {
             printf("failed.\r\n");
         } else if (calibrated) {
